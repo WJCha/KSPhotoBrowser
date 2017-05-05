@@ -9,6 +9,10 @@
 #import "KSPhotoBrowser.h"
 #import "KSPhotoView.h"
 
+#import <Photos/Photos.h>
+#import "SVProgressHUD.h"
+
+
 #if __has_include(<YYWebImage/YYWebImage.h>)
 #import <YYWebImage/YYWebImage.h>
 #else
@@ -73,6 +77,11 @@ static const NSTimeInterval kSpringAnimationDuration = 0.5;
 - (void)viewDidLoad {
     [super viewDidLoad];
     // Do any additional setup after loading the view.
+    
+    // 设置HUD停留时长
+    [SVProgressHUD setMinimumDismissTimeInterval:1.0];
+    
+    
     
     self.view.backgroundColor = [UIColor clearColor];
     
@@ -477,14 +486,181 @@ static const NSTimeInterval kSpringAnimationDuration = 0.5;
     if (!image) {
         return;
     }
-    UIActivityViewController *activityViewController = [[UIActivityViewController alloc] initWithActivityItems:@[image] applicationActivities:nil];
-    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        activityViewController.popoverPresentationController.sourceView = longPress.view;
-        CGPoint point = [longPress locationInView:longPress.view];
-        activityViewController.popoverPresentationController.sourceRect = CGRectMake(point.x, point.y, 1, 1);
-    }
-    [self presentViewController:activityViewController animated:YES completion:nil];
+    
+    
+    // 弹出保存按钮的弹窗控制器
+    UIAlertController *alertVc = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    [alertVc addAction:[UIAlertAction actionWithTitle:@"保存图片" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        
+        // 判断授权状态
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+        if (status == PHAuthorizationStatusRestricted) { // 因为家长控制, 导致应用无法方法相册(跟用户的选择没有关系)
+            [SVProgressHUD showErrorWithStatus:@"家长控制,无法访问相册"];
+        } else if (status == PHAuthorizationStatusDenied) { // 用户拒绝当前应用访问相册(用户当初点击了"不允许")
+            NSLog(@"提醒用户去[设置-隐私-照片-xxx]打开访问开关");
+            
+            if ([[UIDevice currentDevice].systemVersion integerValue] < 8.0) {
+                UIAlertView *av = [[UIAlertView alloc] initWithTitle:@"没有相册访问权限" message:nil
+ delegate:nil cancelButtonTitle:nil otherButtonTitles:@"前往设置-隐私允许该应用访问照片", nil];
+                [av show];
+            }
+            
+            // iOS8.0以后
+            UIAlertController *alertVc = [UIAlertController alertControllerWithTitle:@"无相册访问权限" message:nil preferredStyle:UIAlertControllerStyleAlert];
+            [alertVc addAction:[UIAlertAction actionWithTitle:@"去设置" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+                NSURL *url = [NSURL URLWithString:UIApplicationOpenSettingsURLString];
+                if ([[UIApplication sharedApplication] canOpenURL:url]) {
+                    [[UIApplication sharedApplication] openURL:url options:@{UIApplicationOpenURLOptionsOpenInPlaceKey:@"1"} completionHandler:nil];
+                }
+            }]];
+            
+            [alertVc addAction:[UIAlertAction actionWithTitle:@"不了" style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:alertVc animated:YES completion:nil];
+            
+            
+            
+        } else if (status == PHAuthorizationStatusAuthorized) { // 用户允许当前应用访问相册(用户当初点击了"好")
+            [self saveImageWinthImage:image];
+        } else if (status == PHAuthorizationStatusNotDetermined) { // 用户还没有做出选择
+            // 弹框请求用户授权
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+                if (status == PHAuthorizationStatusAuthorized) { // 用户点击了好
+                    [self saveImageWinthImage:image];
+                }
+            }];
+        }
+        
+    }]];
+    
+    [alertVc addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleDefault handler:nil]];
+    
+    [self presentViewController:alertVc animated:YES completion:nil];
+    
+//    UIActivityViewController *activityViewController = [[UIActivityViewController alloc] initWithActivityItems:@[image] applicationActivities:nil];
+//    if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+//        activityViewController.popoverPresentationController.sourceView = longPress.view;
+//        CGPoint point = [longPress locationInView:longPress.view];
+//        activityViewController.popoverPresentationController.sourceRect = CGRectMake(point.x, point.y, 1, 1);
+//    }
+//    [self presentViewController:activityViewController animated:YES completion:nil];
 }
+
+
+#pragma mark - 保存图片方法
+//static NSString * WJAssetCollectionTitle = @"WJCha";
+/**
+ *  保存照片
+ */
+- (void)saveImageWinthImage:(UIImage *)image
+{
+    // PHAsset : 一个资源, 比如一张图片\一段视频
+    // PHAssetCollection : 一个相簿
+    
+    // PHAsset的标识, 利用这个标识可以找到对应的PHAsset对象(图片对象)
+    __block NSString *assetLocalIdentifier = nil;
+    
+    // 如果想对"相册"进行修改(增删改), 那么修改代码必须放在[PHPhotoLibrary sharedPhotoLibrary]的performChanges方法的block中
+    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+        // 1.保存图片A到"相机胶卷"中
+        // 创建图片的请求
+        assetLocalIdentifier = [PHAssetCreationRequest creationRequestForAssetFromImage:image].placeholderForCreatedAsset.localIdentifier;
+    } completionHandler:^(BOOL success, NSError * _Nullable error) {
+        if (success == NO) {
+            [self showError:@"保存图片失败!"];
+            return;
+        }
+        
+        // 2.获得相簿
+        PHAssetCollection *createdAssetCollection = [self createdAssetCollection];
+        if (createdAssetCollection == nil) {
+            [self showError:@"创建相簿失败!"];
+            return;
+        }
+        
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            // 3.添加"相机胶卷"中的图片A到"相簿"D中
+            
+            // 获得图片
+            PHAsset *asset = [PHAsset fetchAssetsWithLocalIdentifiers:@[assetLocalIdentifier] options:nil].lastObject;
+            
+            // 添加图片到相簿中的请求
+            PHAssetCollectionChangeRequest *request = [PHAssetCollectionChangeRequest changeRequestForAssetCollection:createdAssetCollection];
+            
+            // 添加图片到相簿
+            [request addAssets:@[asset]];
+        } completionHandler:^(BOOL success, NSError * _Nullable error) {
+            if (success == NO) {
+                [self showError:@"保存图片失败!"];;
+            } else {
+                [self showSuccess:@"保存图片成功!"];;
+            }
+        }];
+    }];
+}
+
+
+
+/**
+ *  获得相簿
+ */
+- (PHAssetCollection *)createdAssetCollection
+{
+    
+    // 获取当前APP的名称作为相簿的名称
+    NSDictionary *appInfo = [[NSBundle mainBundle] infoDictionary];
+//    NSLog(@"%@", appInfo);
+    NSString *appName = [appInfo objectForKey:@"CFBundleName"];
+    
+    
+    
+    // 从已存在相簿中查找这个应用对应的相簿
+    PHFetchResult<PHAssetCollection *> *assetCollections = [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeAlbum subtype:PHAssetCollectionSubtypeAlbumRegular options:nil];
+    for (PHAssetCollection *assetCollection in assetCollections) {
+        
+        if ([assetCollection.localizedTitle isEqualToString:appName]) {
+            return assetCollection;
+        }
+    }
+    
+    // 没有找到对应的相簿, 得创建新的相簿
+    
+    // 错误信息
+    NSError *error = nil;
+    
+    // PHAssetCollection的标识, 利用这个标识可以找到对应的PHAssetCollection对象(相簿对象)
+    __block NSString *assetCollectionLocalIdentifier = nil;
+    [[PHPhotoLibrary sharedPhotoLibrary] performChangesAndWait:^{
+        // 创建相簿的请求
+        assetCollectionLocalIdentifier = [PHAssetCollectionChangeRequest creationRequestForAssetCollectionWithTitle:appName].placeholderForCreatedAssetCollection.localIdentifier;
+    } error:&error];
+    
+    // 如果有错误信息
+    if (error) return nil;
+    
+    // 获得刚才创建的相簿
+    return [PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[assetCollectionLocalIdentifier] options:nil].lastObject;
+}
+
+- (void)showSuccess:(NSString *)text
+{
+    // UI相关操作需要回到主线程
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [SVProgressHUD showSuccessWithStatus:text];
+    });
+}
+
+- (void)showError:(NSString *)text
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [SVProgressHUD showErrorWithStatus:text];
+    });
+}
+
+
+
+
+
+
 
 - (void)didPan:(UIPanGestureRecognizer *)pan {
     KSPhotoView *photoView = [self photoViewForPage:_currentPage];
